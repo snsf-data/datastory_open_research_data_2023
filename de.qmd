@@ -1,0 +1,586 @@
+---
+title: "`r params$title`"
+format:
+  html:
+    toc: false
+    css: ["style.css"]
+    mainfont: Theinhardt
+    fontsize: "16px"
+    # To use instead of self-contained that has been deprecated
+    embed-resources: true
+    # Using custom page layout (via 'style.css')
+    page-layout: custom
+    # Open link in a new window by default
+    link-external-newwindow: true
+    # Display footnotes in pop-up window when hovering on it
+    footnotes-hover: true
+lang: de
+# The empty params are replaced by those passed to "execute_params" when
+# rendering
+params:
+  title: "Open Research Data: ein erster Blick auf die aktuelle Praxis"
+  publication_date: ""
+  lang: "de"
+  doi: ""
+  github_url: ""
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r general-setup}
+#| include: false
+
+## This file contains the ENGLISH version of the data story
+
+# Set general chunk options
+knitr::opts_chunk$set(
+  echo = FALSE, fig.showtext = TRUE, fig.retina = 3,
+  fig.align = "center", warning = FALSE, message = FALSE
+)
+
+# Install snf.datastory package if not available, otherwise load it
+if (!require("snf.datastory")) {
+  if (!require("devtools")) {
+    install.packages("devtools")
+    library(devtools)
+  }
+  install_github("snsf-data/snf.datastory")
+  library(snf.datastory)
+}
+
+# Load packages
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(conflicted)
+library(jsonlite)
+library(here)
+library(glue)
+library(ggbump)
+library(ggiraph)
+library(showtext)
+library(systemfonts)
+library(gt)
+
+# Conflict preferences
+conflict_prefer("filter", "dplyr")
+conflict_prefer("get_datastory_theme", "snf.datastory")
+conflict_prefer("get_datastory_scheme", "snf.datastory")
+
+source(here("R/functions/helpers.R"))
+
+is_theinhardt_available <- file.exists(here("fonts", "TheinhardtReg.otf"))
+
+if (is_theinhardt_available) {
+  
+  sysfonts::font_add(
+    family = "Theinhardt",
+    regular = here("fonts", "TheinhardtReg.otf"),
+    bold = here("fonts", "TheinhardtBold.otf"),
+    bolditalic = here("fonts", "TheinhardtBoldIt.otf"),
+    italic = here("fonts", "TheinhardtRegIt.otf"),
+  )
+  
+  # Need to register the font to allow its use by ggiraph when creating SVG files
+  if (!font_family_exists("Theinhardt")) {
+    
+    # Register existing/downloaded fonts
+    register_font(
+      name = "Theinhardt",
+      plain = list("fonts/TheinhardtReg.otf", 0),
+      bold = list("fonts/TheinhardtBold.otf", 0),
+      italic = list("fonts/TheinhardtRegIt.otf", 0),
+      bolditalic = list("fonts/TheinhardtBoldIt.otf", 0)
+    )
+  }
+  
+  font <- "Theinhardt"
+  
+} else {
+  
+  font <- "Arial"
+  
+}
+
+# Need if we want to use the registered font in ggiraph plots
+showtext_auto()
+
+# Increase showtext package font resolution
+showtext_opts(dpi = 320)
+
+# Set the locale for date formatting (Windows)
+Sys.setlocale(
+  "LC_TIME",
+  switch(
+    params$lang,
+    en = "English",
+    de = "German",
+    fr = "French"
+  )
+)
+
+# Create function to print number with local language-specific format
+print_num <- function(x) snf.datastory::print_num(x, lang = params$lang)
+
+# Knitr hook for local formatting of printed numbers
+knitr::knit_hooks$set(
+  inline = function(x) {
+    if (!is.numeric(x)) {
+      x
+    } else {
+      print_num(x)
+    }
+  }
+)
+
+```
+
+```{r print-header-infos}
+#| results: asis
+
+# Add publication date to header
+cat(format(as_datetime(params$publication_date), "%d.%m.%Y"))
+
+```
+
+```{r prepare-datap}
+#| include: false
+
+# Load data with declared datasets (manually curated).
+outputdata_and_meta <-
+  read_csv2(here("data", "data.csv")) |>
+  mutate(
+    research_area_long =
+      translate_research_area(research_area_short, params$lang)
+  )
+
+# Data on research area of the grants in the dataset above. It contains the
+# weight of each grant with regard to the 3 research area (SSH, MINT, and LS).
+# Weights are 1 and 0s for mono-disciplinary grants. When grants are
+# interdisciplinary, they have a weight of 1/3 for each research area. Since
+# interdisciplinary proposals are not included in this story, weights are used
+# in Figure 3 to reassign interdisciplinary proposals to each research area
+# equally.
+area_recoding <- read_csv2(here("data", "area_recoding.csv"))
+
+# Load data for figure 1
+datasets_per_year <- read_csv2(here("data/datasets_per_year.csv"))
+
+# Compute the number of datasets per year considering all research areas
+# together.
+n_datasets_per_year_all_areas <-
+  datasets_per_year |>
+  mutate(
+    grant_end_year = lubridate::year(lubridate::as_date(EffectiveEndDate)),
+    grant_end_year =
+      if_else(
+        grant_end_year %in% 2017:2018,
+        "2017/18",
+        as.character(grant_end_year)
+      )
+  ) |>
+  distinct(grant_end_year, Number, OutputDataSetId) |>
+  summarise(
+    n = sum(!is.na(OutputDataSetId)),
+    .by = c(Number, grant_end_year)
+  ) |>
+  summarise(
+    n_proj = n(),
+    n_proj_with_ds = sum(n > 0),
+    n_ds = sum(n),
+    prop_proj_with_one_ds = n_proj_with_ds / n_proj,
+    MainDisciplineLevel1 = "all",
+    .by = grant_end_year
+  ) |>
+  arrange(grant_end_year)
+
+# Compute the number of datasets per year and per research area. Since only a
+# few Interdisciplinary grants are included in the data, these grants are
+# reassigned to the 3 main discipline. Each interdisciplinary counts as 1/3 for
+# each main discipline.
+n_datasets_per_year_by_area <-
+  datasets_per_year |>
+  mutate(
+    grant_end_year = lubridate::year(lubridate::as_date(EffectiveEndDate)),
+    grant_end_year =
+      if_else(
+        grant_end_year %in% 2017:2018,
+        "2017/18",
+        as.character(grant_end_year)
+      )
+  ) |>
+  distinct(grant_end_year, Number, OutputDataSetId, MainDisciplineLevel1) |>
+  summarise(
+    n = sum(!is.na(OutputDataSetId)),
+    .by = c(Number, grant_end_year, MainDisciplineLevel1)
+  ) |>
+  summarise(
+    n_proj = n(),
+    n_proj_with_ds = sum(n > 0),
+    n_ds = sum(n),
+    .by = c(grant_end_year, MainDisciplineLevel1)
+  ) |>
+  complete(grant_end_year, MainDisciplineLevel1) |>
+  mutate(across(starts_with("n_"), \(x) replace_na(x, 0))) |>
+  mutate(
+    n_proj_ID =
+      if_else(
+        MainDisciplineLevel1 != "Interdisciplinary",
+        n_proj[MainDisciplineLevel1 == "Interdisciplinary"] / 3,
+        0
+      ),
+    n_proj_with_ds_ID =
+      if_else(
+        MainDisciplineLevel1 != "Interdisciplinary",
+        n_proj_with_ds[MainDisciplineLevel1 == "Interdisciplinary"] / 3,
+        0
+      ),
+    n_ds_ID =
+      if_else(
+        MainDisciplineLevel1 != "Interdisciplinary",
+        n_ds[MainDisciplineLevel1 == "Interdisciplinary"] / 3,
+        0
+      ),
+    .by = grant_end_year
+  ) |>
+  filter(MainDisciplineLevel1 != "Interdisciplinary") |>
+  mutate(
+    n_proj = n_proj + n_proj_ID,
+    n_proj_with_ds = n_proj_with_ds + n_proj_with_ds_ID,
+    n_ds = n_ds + n_ds_ID,
+    prop_proj_with_one_ds = n_proj_with_ds / n_proj
+  ) |>
+  select(!c(n_proj_ID, n_proj_with_ds_ID, n_ds_ID))
+
+# Combining the summarize yearly count of declared dataset for all research
+# areas and by research area together.
+n_datasets_per_year <-
+  bind_rows(
+    n_datasets_per_year_all_areas,
+    n_datasets_per_year_by_area
+  ) |>
+  arrange(grant_end_year, MainDisciplineLevel1) |>
+  mutate(
+    MainDisciplineLevel1 =
+      case_when(
+        str_starts(MainDisciplineLevel1, "Math") ~ "MINT",
+        str_starts(MainDisciplineLevel1, "Bio") ~ "LS",
+        str_starts(MainDisciplineLevel1, "Hum") ~ "SSH",
+        str_starts(MainDisciplineLevel1, "all") ~ "All areas"
+      )
+  ) |>
+  rename(research_area = MainDisciplineLevel1) |>
+  mutate(
+    research_area =
+      fct(
+        translate_research_area(research_area, params$lang, "abbr"),
+        levels =
+          c(
+            translate_research_area(c("SSH", "MINT", "LS"), params$lang, "abbr"),
+            "UNKNOWN"
+          )
+      ) |>
+      fct_relabel(
+        \(x)
+        if_else(
+          x == "UNKNOWN",
+          switch(params$lang, en = "All areas", de = "Alle Bereiche", fr = "Tous les domaines"),
+          x
+        )
+      )
+  )
+
+```
+**Vom SNF geförderte Forschende sollten ihre Datensätze in öffentlichen Archiven ablegen. Oft wird der SNF allerdings gar nicht informiert, ob die Vorgabe eingehalten wurde. Von den gemeldeten Datensätzen erfüllen die meisten die FAIR-Prinzipien.**
+
+Seitdem der SNF 2017 die Strategie der [Open Research Data (ORD)](https://www.snf.ch/de/dMILj9t4LNk8NwyR/thema/open-research-data) eingeführt hat, verlangt er bei den meisten Förderinstrumenten einen Datenmanagement-Plan (DMP). Die aus der geförderten Forschung resultierenden Daten sollen in Archiven abgelegt werden, welche die FAIR-Prinzipien für die Offenlegung von Daten erfüllen.
+
+::: info-box
+### Was ist ein Datenmanagement-Plan?
+
+Ziel des Datenmanagement-Plans (DMP) ist es, den vorgesehenen Lebenszyklus der aus einem Förderbeitrag resultierenden Daten zu definieren. Der Plan legt dar, wie Daten generiert, gesammelt, dokumentiert, publiziert und archiviert werden. Der SNF stellt den Forschenden eine Vorlage zur Verfügung, mit der sie ihren DMP erstellen können. Weitere Informationen liefern die [DMP-Leitlinien für Forschende](https://www.snf.ch/de/FAiWVH4WvpKvohw9/thema/forschungspolitische-positionen).
+
+### Was sind die FAIR-Prinzipien?
+
+Die FAIR-Prinzipien haben zum Ziel, dass Datensätze auffindbar (findable), zugänglich (accessible), kompatibel (interoperable) und wiederverwendbar (re-usable) sind. Der SNF verlangt, dass Daten ohne Einschränkung wiederverwendet werden können, sofern keine rechtlichen, ethischen, urheberrechtlichen oder sonstigen Gründe dagegen sprechen. Offene Forschungsdaten und die FAIR-Prinzipien werden vom SNF als wichtig erachtet, da sie zur Wirkung, Transparenz und Reproduzierbarkeit der Forschung beitragen. Genauere Informationen dazu befinden sich auf der [SNF-Website](https://www.snf.ch/de/dMILj9t4LNk8NwyR/thema/open-research-data). Als Hilfe für die Forschenden beim Übergang zu FAIR-Forschungsdaten hat der SNF [Mindestkriterien](https://www.snf.ch/media/en/zKRJknEq0OHE5pEQ/Checklist_data_repositories.pdf) definiert, denen Datenarchive entsprechen müssen, damit sie die FAIR-Prinzipien erfüllen.
+:::
+
+Der Anteil der Beitragsempfangenden, die dem SNF nach Abschluss ihres Projekts mindestens einen Datensatz als Teil ihrer Outputdaten melden (siehe Kasten), wächst bei allen Förderinstrumenten und Forschungsbereichen kontinuierlich[^1].
+
+[^1]: Förderbeiträge für Infrastrukturen und Wissenschaftskommunikation sind von dieser Analyse ausgenommen.
+
+::: {.hide-mobile .hide-tablet}
+::: plot-box
+<div class="plot-title">Steigender Anteil an Beitragsempfangenden, die einen Datensatz melden</div>
+```{r viz-1-desk}
+#| out-width: "100%"
+#| fig-height: 3
+
+make_ggiraph(make_fig_1(), height = 3)
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Förderbeitrags. Anzahl der Förderbeiträge pro Jahr in diesem Datensatz: Jahr 2017/2018: `r filter(n_datasets_per_year, grant_end_year == "2017/18", research_area == "Alle Bereiche")$n_proj`, Jahr 2019: `r filter(n_datasets_per_year, grant_end_year == "2019", research_area == "Alle Bereiche")$n_proj`, Jahr 2020: `r filter(n_datasets_per_year, grant_end_year == "2020", research_area == "Alle Bereiche")$n_proj`, Jahr 2021: `r filter(n_datasets_per_year, grant_end_year == "2021", research_area == "Alle Bereiche")$n_proj`, Jahr 2022: `r filter(n_datasets_per_year, grant_end_year == "2022", research_area == "Alle Bereiche")$n_proj`, Jahr 2023: `r filter(n_datasets_per_year, grant_end_year == "2023", research_area == "Alle Bereiche")$n_proj`. Das Jahr 2017 enthält nur Förderbeiträge, die nach der Einführung der ORD-Strategie (Oktober 2017) endeten, und ist daher mit 2018 zusammengefasst
+:::
+:::
+:::
+
+::: hide-desktop
+::: plot-box
+<div class="plot-title">Steigender Anteil an Beitragsempfangenden, die einen Datensatz melden</div>
+```{r viz-1-mob}
+#| out-width: "100%"
+#| fig-height: 3
+
+make_fig_1()
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Förderbeitrags. Anzahl der Förderbeiträge pro Jahr in diesem Datensatz: Jahre 2017/2018: `r filter(n_datasets_per_year, grant_end_year == "2017/18", research_area == "Alle Bereiche")$n_proj`, Jahre 2019: `r filter(n_datasets_per_year, grant_end_year == "2019", research_area == "Alle Bereiche")$n_proj`, Jahre 2020: `r filter(n_datasets_per_year, grant_end_year == "2020", research_area == "Alle Bereiche")$n_proj`, Jahre 2021: `r filter(n_datasets_per_year, grant_end_year == "2021", research_area == "Alle Bereiche")$n_proj`, Jahre 2022: `r filter(n_datasets_per_year, grant_end_year == "2022", research_area == "Alle Bereiche")$n_proj`, Jahre 2023: `r filter(n_datasets_per_year, grant_end_year == "2023", research_area == "Alle Bereiche")$n_proj`. Das Jahr 2017 enthält nur Förderbeiträge, die nach der Einführung der ORD-Strategie (Oktober 2017) endeten, und ist daher mit 2018 zusammengefasst
+:::
+:::
+:::
+
+```{r ds-evolution-data}
+
+mint_progress <-
+  n_datasets_per_year |>
+  filter(
+    research_area == translate_research_area("MINT", target_lang = params$lang, "abbr"),
+    grant_end_year %in% c("2017/18", "2023")
+  ) |>
+  summarise(diff = max(prop_proj_with_one_ds) - min(prop_proj_with_one_ds)) |>
+  pull(diff)
+
+ls_progress <-
+  n_datasets_per_year |>
+  filter(
+    research_area == translate_research_area("LS", target_lang = params$lang, "abbr"),
+    grant_end_year %in% c("2017/18", "2023")
+  ) |>
+  summarise(diff = max(prop_proj_with_one_ds) - min(prop_proj_with_one_ds)) |>
+  pull(diff)
+
+ssh_progress_2017_2021 <-
+  n_datasets_per_year |>
+  filter(
+    research_area == translate_research_area("SSH", target_lang = params$lang, "abbr"),
+    grant_end_year %in% c("2017/18", "2021")
+  ) |>
+  summarise(diff = max(prop_proj_with_one_ds) - min(prop_proj_with_one_ds)) |>
+  pull(diff)
+
+ssh_progress_2021_2023 <-
+  n_datasets_per_year |>
+  filter(
+    research_area == translate_research_area("SSH", target_lang = params$lang, "abbr"),
+    grant_end_year %in% c("2021", "2023")
+  ) |>
+  summarise(diff = max(prop_proj_with_one_ds) - min(prop_proj_with_one_ds)) |>
+  pull(diff)
+
+dat_2023 <-
+  n_datasets_per_year |>
+  filter(
+    research_area == switch(params$lang, en = "All areas", de = "Alle Bereiche", fr = "Tous les domaines"),
+    grant_end_year == "2023"
+  )
+
+```
+
+
+Die stärkste Zunahme (+`r round(mint_progress * 100)` Prozentpunkte seit 2017/18) war bei den Projekten im Bereich Mathematik, Informatik, Naturwissenschaft, Technik (`r translate_research_area("MINT", abbr_or_long = "abbr", target_lang = params$lang)`) zu verzeichnen. Auch in den `r translate_research_area("LS", abbr_or_long = "long", target_lang = params$lang)` (`r translate_research_area("LS", abbr_or_long = "abbr", target_lang = params$lang)`) ist die Zahl der gemeldeten Datensätze seit 2017/18 gestiegen (+`r round(ls_progress * 100)` Prozentpunkte). In den `r translate_research_area("SSH", abbr_or_long = "long", target_lang = params$lang)` (`r translate_research_area("SSH", abbr_or_long = "abbr", target_lang = params$lang)`) wuchs die Zahl zwischen 2017/18 und 2021 (+`r round(ssh_progress_2017_2021 * 100)` Prozentpunkte), seither hat sich der Aufwärtstrend jedoch abgeflacht (+`r round(ssh_progress_2021_2023 * 100)` Prozentpunkte zwischen 2021 und 2023). In den `r translate_research_area("SSH", abbr_or_long = "abbr", target_lang = params$lang)` und vor allem in den Sozialwissenschaften betrifft ein Teil der Projekte sensible Daten; zudem sind die Publikationszyklen tendenziell länger.
+
+Gesuchstellende, deren Beiträge 2023 ausliefen, mussten vor Projektbeginn einen DMP vorlegen. Gemäss den DMP bestand in vielen Fällen die Absicht, Datensätze in (häufig öffentlichen) FAIR-Archiven abzulegen (siehe auch [den ersten Bericht des SNF über die Einhaltung der ORD-Vorgaben](https://zenodo.org/record/3618123#.YzMEknZBxaQ)). Gemäss unserer Analyse wurde jedoch für lediglich `r round(dat_2023$prop_proj_with_one_ds * 100)`% oder `r dat_2023$n_proj_with_ds` dieser Beiträge (von insgesamt  `r dat_2023$n_proj` auslaufenden Beiträgen im Jahr 2023) mindestens ein Datensatz gemeldet. Beitragsempfangende, die tatsächlich Datensätze veröffentlichten, stellten durchschnittlich `r round(dat_2023$n_ds / dat_2023$n_proj_with_ds, 2)` Datensätze zur Verfügung, was insgesamt `r dat_2023$n_ds` gemeldete Datensätze ergab.
+
+Ein Vergleich zwischen Open Research Data (ORD) und Open-Access-Publikationen zeigt, dass die meisten Beitragsempfangenden wissenschaftliche Publikationen meldeten, die überwiegend öffentlich zugänglich waren. Häufig stützen sich solche Publikationen auf Datensätze, die als Forschungsergebnisse gemeldet werden sollten. Deshalb stellt sich die Frage, weshalb der ORD-Anteil lediglich `r round(dat_2023$prop_proj_with_one_ds * 100)`% beträgt. Die Gründe für diesen geringen Anteil sind vielfältig und nicht immer ganz klar:
+
+-   Datenschutz und eingeschränkte Nutzungsrechte für Daten verunmöglichen es manchmal, einen Datensatz zu veröffentlichen. Die Forschenden sind sich nicht bewusst, dass die Metadaten solcher Datensätze dennoch gemeldet werden sollten.
+-   Gewisse Publikationen beruhen auf theoretischen Arbeiten und nicht auf Daten. Daher erstellen Forschende teilweise überhaupt keine Datensätze. Oder sie sind sich nicht bewusst, dass ihre Ergebnisse als Daten betrachtet werden können, die öffentlich zugänglich sein sollten, z. B. eine kleine qualitative Umfrage oder der Code für einen Algorithmus.
+-   Ein Teil der Forschenden arbeitet mit sehr grossen Datensätzen. In diesen Fällen kann es schwierig sein, die Daten öffentlich zugänglich zu machen, denn nicht alle haben die dafür erforderlichen Ressourcen.
+-   Einige Forschende sind sich der ORD-Strategie des SNF vielleicht einfach nicht bewusst. Das Thema ist in gewissen Forschungsgemeinschaften noch neu und wird nicht in allen Disziplinen gleich konsequent umgesetzt.
+-   Ein weiterer Grund für den geringen Anteil ist, dass das ORD-Monitoring des SNF im Gegensatz zum Monitoring der OA-Publikationen nur diejenigen Datensätze erfasst, die von den Forschenden direkt dem SNF gemeldet werden. Externe Quellen werden noch nicht berücksichtigt. Der SNF beabsichtigt, künftig Informationen aus öffentlichen Datenbanken ins ORD-Monitoring einzubeziehen.
+
+Die vorliegende Analyse zeigt, dass der SNF weiterhin die Forschenden für das Thema offene Forschungsdaten sensibilisieren muss. Ein Schritt besteht darin, dieses ORD-Monitoring künftig regelmässig durchzuführen. Indem der SNF die Ergebnisse analysiert und veröffentlicht, will er aufzeigen, wie wichtig gute ORD-Praktiken sind.
+
+Im internationalen Vergleich deckt sich die Beobachtung, dass nur ein kleiner Teil der Beitragsempfangenden mindestens einen Datensatz meldet, mit der [Studie des PLOS-Verlags](https://theplosblog.plos.org/2022/12/open-science-indicators-first-dataset/). Der Studie zufolge bezogen sich rund 28% der PLOS-Forschungsartikel auf einen in einem Datenarchiv öffentlich zugänglichen Datensatz. Bei auf PuBMed Central publizierten öffentlichen Forschungsartikeln waren es 15%. Die Ergebnisse stehen auch in Einklang mit dem [European Research Data Landscape Survey](https://fair-impact.eu/news/european-research-data-landscape-final-report): Gemäss dieser Umfrage veröffentlichten 22% der Befragten während ihrer aktuellen oder letzten Forschungstätigkeit Daten in Archiven. Somit bewegen sich die ORD-Anteile bei anderen Organisationen auf ähnlichem Niveau wie beim SNF. Es dürfte deshalb auch strukturelle Gründe für den geringen Anteil von gemeldeten Datensätzen bei SNF-Förderbeiträgen geben.
+
+Das Ergebnis des vorliegenden Monitorings ist Ausdruck eines systembedingten Problems: Offene Forschungsdaten sind in der Wissenschaft noch nicht so etabliert wie frei zugängliche Publikationen. Die Zahlen zeigen jedoch einen ansteigenden Trend. Mit seiner ORD-Strategie unterstützt der SNF diese Entwicklung und setzt ein Zeichen für mehr Transparenz in der Wissenschaft.
+
+### Gewählte Datenarchive meistens FAIR
+
+Wie die nächste Grafik veranschaulicht, wählen die Forschenden für die Bereitstellung von Datensätzen in den meisten Fällen digitale Datensammlungen, die den FAIR-Prinzipien entsprechen. FAIR bedeutet allerdings nicht zwingend auch frei zugänglich. Dies hängt manchmal, aber nicht immer mit legitimen Datenschutzbestimmungen zusammen. Gemäss dieser ersten Analyse konnte nur rund die Hälfte der gemeldeten Datensätze als offen identifiziert werden, während dies bei der anderen Hälfte unklar war (siehe Kasten «Wie sammelt der SNF die Outputdaten?» am Ende des Artikels).
+
+::: {.hide-mobile .hide-tablet}
+::: plot-box
+<div class="plot-title">Steigender Anteil der gemeldeten FAIR-Datensätze</div>
+```{r viz-2-desk}
+#| out-width: "100%"
+#| fig-height: 4.5
+
+make_ggiraph(make_fig_2(), height = 4.5, sw = NA, scolor = NA)
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Förderbeitrags. Die Analyse basiert auf einem manuell erstellten Datensatz, der keine Daten für 2023 enthält. Das Jahr 2017 enthält nur Förderbeiträge, die nach der Einführung der ORD-Strategie (Oktober 2017) endeten, und ist daher mit 2018 zusammengefasst
+:::
+:::
+:::
+
+::: hide-desktop
+::: plot-box
+<div class="plot-title">Steigender Anteil der gemeldeten FAIR-Datensätze</div>
+```{r viz-2-mob}
+#| out-width: "100%"
+#| fig-height: 4.5
+
+make_fig_2()
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Förderbeitrags. Die Analyse basiert auf einem manuell erstellten Datensatz, der keine Daten für 2023 enthält. Das Jahr 2017 enthält nur Förderbeiträge, die nach der Einführung der ORD-Strategie (Oktober 2017) endeten, und ist daher mit 2018 zusammengefasst
+:::
+:::
+:::
+
+### Bevorzugtes Datenarchiv ist Zenodo
+
+```{r repository-data}
+
+repo_all <-
+  outputdata_and_meta |>
+  mutate(
+    is_fair =
+      case_when(
+        fair_data_repository ~ "FAIR",
+        !fair_data_repository ~ "Not FAIR",
+        .default = "Unknown"
+      ),
+    repository_name =
+      if_else(
+        str_to_lower(repository_name) == "github",
+        "GitHub",
+        str_remove(repository_name, " \\s*\\(.+")
+      )
+  ) |>
+  filter(is_fair != "Unknown") |>
+  mutate(
+    grant_end_year =
+      case_when(
+        grant_end_year %in% c("2019", "2020") ~ "2019/20",
+        grant_end_year %in% c("2021", "2022") ~ "2021/22",
+        .default = grant_end_year
+      )
+  ) |>
+  count(grant_end_year, repository_name, is_fair) |>
+  mutate(
+    prop = n / sum(n),
+    N = sum(n, na.rm = TRUE),
+    .by = grant_end_year,
+  )
+
+repo_all_to_keep <-
+  repo_all |>
+  slice_max(prop, n = 20, by = grant_end_year, with_ties = FALSE) |>
+  distinct(repository_name) |>
+  pull(repository_name)
+
+repo_all_formatted <-
+  repo_all |>
+  filter(repository_name %in% repo_all_to_keep) |>
+  complete(grant_end_year, repository_name) |>
+  mutate(
+    prop = replace_na(prop, 0),
+    grant_end_year = as.factor(grant_end_year)
+  ) |>
+  mutate(
+    rank = rank(1 - prop, ties.method = "first"),
+    .by = grant_end_year
+  ) |>
+  mutate(
+    is_fair = unique(is_fair[!is.na(is_fair)]),
+    .by = repository_name
+  )
+
+best_repo_2021_2022 <- filter(repo_all, grant_end_year == "2021/22") |> slice_max(n)
+
+```
+
+Seit 2017 wird `r best_repo_2021_2022$repository_name` immer beliebter. Innert vier Jahren wurde es zum Archiv der Wahl für `r round(best_repo_2021_2022$prop * 100)`% der gemeldeten Datensätze. Abgesehen von einigen wenigen Datenarchiven (v.a. Zenodo und ETH Research Collections) werden die Archive je nach Forschungsbereich sehr unterschiedlich genutzt ([Open Science Framework](https://www.cos.io/products/osf) und [SwissUbase](https://www.swissubase.ch/de/) von den `r translate_research_area("SSH", abbr_or_long = "abbr", target_lang = params$lang)` und [Gene Expression Omnibus](https://www.ncbi.nlm.nih.gov/geo/) von den `r translate_research_area("LS", abbr_or_long = "abbr", target_lang = params$lang)`). Diese Fragmentierung widerspiegelt die grosse Vielfalt der Daten in den vom SNF finanzierten Projekten.
+
+::: {.hide-mobile .hide-tablet}
+::: plot-box
+<div class="plot-title">Die 20 am häufigsten gemeldeten Datenarchive nach Nutzungsanteil (%) für drei Zeiträume</div>
+```{r viz-3-desk}
+#| out-width: "100%"
+#| fig-height: 5
+
+make_ggiraph(make_fig_3(text_size = 2.5), height = 5)
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Beitrags. Die in der Abbildung dargestellte Rangfolge ist relativ und gibt nur die Position des Archivs in der Rangliste an. Die Beliebtheit der einzelnen Datenarchive ist als Gesamtzahl und in Prozent neben dem Namen des jeweiligen Archivs angegeben. Die Analyse basiert auf einem manuell erstellten Datensatz, der keine Daten für 2023 enthält.
+:::
+:::
+:::
+
+
+::: hide-desktop
+::: plot-box
+<div class="plot-title">Die 20 am häufigsten gemeldeten Datenarchive nach Nutzungsanteil (%) für drei Zeiträume</div>
+```{r viz-3-mob}
+#| out-width: "100%"
+#| fig-height: 5
+
+make_fig_3()
+
+```
+::: caption
+Das Jahr bezieht sich auf das Enddatum des Beitrags. Die in der Abbildung dargestellte Rangfolge ist relativ und gibt nur die Position des Archivs in der Rangliste an. Die Beliebtheit der einzelnen Datenarchive ist als Gesamtzahl und in Prozent neben dem Namen des jeweiligen Archivs angegeben. Die Analyse basiert auf einem manuell erstellten Datensatz, der keine Daten für 2023 enthält.
+:::
+:::
+:::
+
+### Wachsendes Bewusstsein für Datensätze
+
+Datensätze werden also immer häufiger gemeldet und auf Archiven, die den FAIR-Prinzipien entsprechen, zugänglich gemacht. Dies weist auf ein wachsendes Bewusstsein dafür hin, dass sich der Forschungsoutput nicht auf wissenschaftliche Artikel beschränkt und dass die Bereitstellung von (Meta-)Daten wichtige und wertvolle Informationen liefert. Während jedoch [die meisten wissenschaftlichen Publikationen von SNF-Beitragsempfangenden öffentlich zugänglich sind](https://data.snf.ch/stories/open-access-publikationen-monitoring-2021-de.html), besteht bei der Offenlegung und Meldung von Datensätzen noch beträchtliches Verbesserungspotenzial. Das derzeitige System zur Würdigung wissenschaftlicher Leistungen ist immer noch zu sehr auf die Veröffentlichung von Publikationen ohne die zugrunde liegenden Datensätze ausgerichtet. Mit der [Nationalen Strategie für Open Research Data](https://www.swissuniversities.ch/fileadmin/swissuniversities/Dokumente/Hochschulpolitik/ORD/Swiss_National_ORD_Strategy_de.pdf) und dem dazugehörigen [Aktionsplan](https://www.swissuniversities.ch/fileadmin/swissuniversities/Dokumente/Hochschulpolitik/ORD/ActionPlanV1.0_December_2021_def.pdf) tragen der SNF und seine Partner im Forschungsbereich dazu bei, dass sich die Praxis der offenen Wissenschaft durchsetzt und Datensätze als wichtige Forschungsergebnisse anerkannt werden.
+
+::: info-box
+### Wie sammelt der SNF die Outputdaten?
+
+Seit 2011 werden die Beitragsempfangenden aufgefordert, dem SNF ihren Forschungsoutput zu melden (2018 wurde die Kategorie «Datensatz» hinzugefügt). Die Beitragsempfangenden können die Outputdaten jederzeit während oder nach der Beitragsdauer eingeben. Sie werden jeweils bei der Einreichung eines wissenschaftlichen Berichts (Jahres-, Zwischen- oder Schlussbericht) sowie eineinhalb Jahre nach Beitragsende daran erinnert, dass sie Outputdaten einreichen sollten.
+
+Die in dieser Datengeschichte verwendeten Daten stammen aus den «Outputdaten: Datensets», die im [Bereich Datensätze](https://data.snf.ch/datasets) des SNF-Datenportals verfügbar sind. Berücksichtigt wurden alle Förderinstrumente (ausser Infrastrukturen und Wissenschaftskommunikation).
+
+In die Berechnung des Anteils der Beitragsempfangenden, die einen Datensatz meldeten, flossen Förderbeiträge ein, die zwischen Oktober 2017 und Dezember 2023 endeten. Für die letzten beiden Grafiken wurden die Daten aus den «Outputdaten: Datensets» Mitte März 2023 erhoben. Eingeflossen sind Förderbeiträge, die zwischen Oktober 2017 und Dezember 2022 endeten. 
+
+Die Daten wurden manuell bearbeitet, um die FAIRness der Datenarchive im Sinne der SNF-Leitlinien zu überprüfen. Diese FAIRness entwickelt sich im Laufe der Zeit, und es ist möglich, dass die Einhaltung der vom SNF festgelegten ORD-Kriterien bei den in dieser Studie untersuchten Datenarchiven nicht mehr gleich ist wie zum Zeitpunkt der Studie.
+
+Die vom SNF geförderten Forschenden werden aufgefordert, Datensätze zu veröffentlichen, auf denen ihre Publikationen beruhen. Die Daten sollten öffentlich zugänglich sein, sofern keine rechtlichen, ethischen, urheberrechtlichen oder sonstigen Gründe dagegen sprechen. Die Offenheit eines Datensatzes mit DOI-Nummer wurde anhand von Metadaten von [DataCite](https://datacite.org/) bestimmt. Ein Datensatz wurde als öffentlich zugänglich betrachtet, wenn die Metadaten darauf hinwiesen, dass der Datensatz öffentlich oder mit einer öffentlichen Lizenz versehen war oder eine der folgenden Lizenzen hatte:
+
+-   Creative Commons (CC-BY)
+-   General Public License (GPL)
+-   Open Data Commons (ODC)
+-   MIT
+-   Apache
+-   Berkeley Software Distribution (BSD) 
+
+Bei Datensätzen ohne Metadaten zur Offenheit oder zu einer allfälligen Lizenz wurde angenommen, dass diese Angaben nicht bekannt sind.
+:::
+
+Daten, Text und Code dieser Datengeschichte sind [auf Github verfügbar](`r params$github_url`) und [auf Zenodo archiviert](`r params$doi`). <br>DOI: `r str_remove(params$doi, "https://doi.org/")`
+
+```{r prevent-internal-snsf-packages, include=FALSE}
+#| include: false
+
+# Internal SNSF packages must not be used in data stories, as their
+# pre-processing functions are internal and the corporate design differs from
+# the data portal.
+if (any(c("snfverse", "snf.preprocessing", "snf.plot") %in% 
+        loadedNamespaces())) {
+  stop(glue(
+    "You must not use internal SNSF packages in data stories.",
+    " Please resort to snf.datastory."
+  ))
+}
+```
