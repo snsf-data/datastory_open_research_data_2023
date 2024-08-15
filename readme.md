@@ -54,4 +54,4 @@ The data used in this data story are available in the folder `data`. The data co
     -   `is_MINT`: Whether the grant's research area is MINT. For mono-disciplinary grants, the value is 1 (MINT) or 0 (not MINT). For interdisciplinary grants, the value represents the share of disciplines from the MINT research area listed in the application.
     -   `is_LS`: Whether the grant's research area is LS. For mono-disciplinary grants, the value is 1 (LS) or 0 (not LS). For interdisciplinary grants, the value represents the share of disciplines from the LS research area listed in the application.
 
-In case of any questions, please contact: [datastories\@snf.ch](mailto:datastories@snf.ch){.email}.
+In case of any questions, please contact: [datastories\@snf.ch](mailto:datastories@snf.ch).
